@@ -1,0 +1,19 @@
+Art credits
+===========
+
+Ninja Adventure Asset Pack
+  by Pixel-boy (https://pixel-boy.itch.io/) and AAA (https://www.instagram.com/challenger.aaa/)
+  https://pixel-boy.itch.io/ninja-adventure-asset-pack
+  License: Creative Commons Zero (CC0 1.0) – attribution not required, given with thanks.
+
+Used here: characters (SorcererBlack, NinjaMageBlack, Shaman, Spirit, Vampire), monsters (Slime2, Mushroom, Spirit, Skeleton, AxolotBlue, KappaGreen, BlueBat, Cyclope, Spirit2, Beast, Skull), character DemonRed,
+TilesetFloor, TilesetNature, TilesetElement, TilesetVillageAbandoned, TilesetWater, TilesetLogic, TilesetDungeon, TilesetReliefDetail, items (Heart, CrateEmpty, Scroll, GoldKey, SilverKey), FX (magic circle, water ripples, fire),
+projectiles (EnergyBall, PlantSpike, IceSpike, Fireball, CanonBall, Bone).
+
+Drawn for this game in the pack's palette (Tools/draw_sprites.py): Glove, Shield, PlateUp/Down, LeverOff/On.
+
+Audio (Assets/Resources/Audio), same pack and licence (CC0):
+  Music: 13 Mystical (menu), 37 Dark Forest, 26 Lost Village, 18 Aquatic, 2 The Cave, 28 Tension, 12 Temple,
+         17 Fight (fights, levels 0–2), 34 Fight (fights, levels 3–5)
+  Sounds: Menu, Bonus, Magic & Skill, Hit & Impact, Whoosh & Slash, Elemental, Ambient (wind, river, storm)
+  Jingles: LevelUp1, GameOver, Success1
