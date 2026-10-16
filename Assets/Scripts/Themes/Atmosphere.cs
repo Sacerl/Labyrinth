@@ -9,10 +9,16 @@ public class Atmosphere : MonoBehaviour
 {
     public static Atmosphere Current { get; private set; }
 
+    // 1 while the level-start overview shows the whole maze (fading out with the zoom), or during a lightning flash:
+    // the moments the rune order can be seen.
+    public float Revealed => Mathf.Max(reveal, flashUntil > 0f ? 1f : 0f);
+
     LevelTheme theme;
     Light2D global, lantern;
     VolumeProfile profile;
     Vignette vignette;
+    float vignetteIntensity;
+    float reveal; // 1 while the level-start overview shows the whole maze, fading to 0 with the zoom
     Transform player;
 
     public static Atmosphere Create(Transform root, LevelData L, LevelTheme theme, Transform player)
@@ -100,7 +106,8 @@ public class Atmosphere : MonoBehaviour
         bloom.threshold.Override(1f);
         bloom.scatter.Override(0.7f);
         vignette = profile.Add<Vignette>(true);
-        vignette.intensity.Override(0.32f + 0.12f * c);
+        vignetteIntensity = 0.32f + 0.12f * c;
+        vignette.intensity.Override(vignetteIntensity);
         vignette.smoothness.Override(0.75f);
         vignette.color.Override(Color.black);
         var colors = profile.Add<ColorAdjustments>(true);
@@ -128,7 +135,10 @@ public class Atmosphere : MonoBehaviour
             Vector2 v = cam.WorldToViewportPoint(player.position);
             bool onScreen = v.x > -0.05f && v.x < 1.05f && v.y > -0.05f && v.y < 1.05f;
             // off screen = the camera is at the fight box: frame the box, not a far-away screen corner
-            vignette.center.Override(onScreen ? new Vector2(Mathf.Clamp01(v.x), Mathf.Clamp01(v.y)) : new Vector2(0.5f, 0.5f));
+            Vector2 center = onScreen ? new Vector2(Mathf.Clamp01(v.x), Mathf.Clamp01(v.y)) : new Vector2(0.5f, 0.5f);
+            // the level-start overview shows the whole maze: no darkness around the (tiny, corner) player then
+            vignette.center.Override(Vector2.Lerp(center, new Vector2(0.5f, 0.5f), reveal));
+            vignette.intensity.Override(vignetteIntensity * (1f - reveal));
         }
         if (lantern && theme.flicker > 0f)
         {
@@ -162,15 +172,18 @@ public class Atmosphere : MonoBehaviour
     // Level start: moonlight shows the whole maze while the camera holds the overview, then the dark returns.
     public IEnumerator Reveal(float hold, float fade)
     {
+        reveal = 1f;
         SetAmbient(theme.revealColor, theme.revealIntensity);
         yield return new WaitForSeconds(hold);
         for (float t = 0; t < fade; t += Time.deltaTime)
         {
             float k = Mathf.SmoothStep(0f, 1f, t / fade);
+            reveal = 1f - k;
             SetAmbient(Color.Lerp(theme.revealColor, theme.ambient, k),
                 Mathf.Lerp(theme.revealIntensity, theme.ambientIntensity, k));
             yield return null;
         }
+        reveal = 0f;
         SetAmbient(theme.ambient, theme.ambientIntensity);
     }
 

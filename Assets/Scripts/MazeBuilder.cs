@@ -77,9 +77,12 @@ public static class MazeBuilder
         }
 
         BuildPuzzles(L, level, theme);
+        BuildRoomParts(L, root);
 
         foreach (var run in L.patrols) level.enemies.Add(MakeEnemy(L, root, run, false, theme));
         foreach (var run in L.forced) level.enemies.Add(MakeEnemy(L, root, run, true, theme));
+        foreach (var g in L.guards ?? new GuardData[0])
+            level.enemies.Add(MakeEnemy(L, root, new EnemyRun { cells = g.cells }, true, theme));
 
         var player = SpriteFactory.Create("Player", root, SpriteFactory.Circle, L.CellCenter(L.start),
             Vector2.one * 1.2f, SpriteFactory.Hex("#1971c2"), 3).gameObject;
@@ -139,6 +142,13 @@ public static class MazeBuilder
                 LevelArt.Barrier(root, wall, theme, s.set == "A" ? theme.letterA : theme.letterB, Color.white,
                     Vertical(s.edge), LevelData.Cell - Wall);
         }
+        foreach (var e in L.runeGates ?? new Edge[0])
+        {
+            var wall = Bar(L, root, e, "#9c36b5", EdgeBar.Kind.Rune);
+            if (theme.door)
+                LevelArt.Barrier(root, wall, theme, ArtLib.Whole("Items/Rune"), Color.white, Vertical(e), LevelData.Cell - Wall);
+            Atmosphere.Glow(wall.gameObject, new Color(0.75f, 0.5f, 1f), 1.4f, 0.6f, 0.3f);
+        }
         foreach (var lv in L.levers ?? new CellPos[0])
         {
             var lever = SpriteFactory.Create("Lever", root, SpriteFactory.Circle, L.CellCenter(lv), Vector2.one * 1.3f,
@@ -176,6 +186,69 @@ public static class MazeBuilder
         }
     }
 
+    // Ice floor, rocks and rune stones (the puzzle rooms' and the runes' parts that aren't boxes, plates or walls).
+    static void BuildRoomParts(LevelData L, Transform root)
+    {
+        float cell = LevelData.Cell;
+        var ice = ArtLib.Tile("Tiles/TilesetFloor", 8, 22);
+        var iceCells = new HashSet<Vector2Int>();
+        foreach (var c in L.ice ?? new CellPos[0]) iceCells.Add(c.V);
+        var floor = new List<Vector2Int>(iceCells);
+        foreach (var c in L.rocks ?? new CellPos[0]) // a rock in an ice hall stands on ice too
+            foreach (var d in new[] { Vector2Int.up, Vector2Int.down, Vector2Int.left, Vector2Int.right })
+                if (iceCells.Contains(c.V + d))
+                {
+                    floor.Add(c.V);
+                    break;
+                }
+        foreach (var c in floor)
+        {
+            var sr = SpriteFactory.Create("Ice", root, SpriteFactory.Square, L.CellCenter(c), Vector2.one * cell,
+                new Color(0.75f, 0.9f, 1f, 0.85f), LevelArt.FloorDetailOrder + 1);
+            if (!ice) continue;
+            sr.transform.localScale = Vector3.one;
+            sr.sprite = ice;
+            sr.drawMode = SpriteDrawMode.Tiled;
+            sr.size = Vector2.one * cell;
+        }
+        var rock = ArtLib.Cut("Tiles/TilesetNature", 240, 224, 32, 32);
+        foreach (var c in L.rocks ?? new CellPos[0])
+        {
+            var go = SpriteFactory.Create("Rock", root, SpriteFactory.Circle, L.CellCenter(c), Vector2.one * 2.4f,
+                SpriteFactory.Hex("#868e96"), 1).gameObject;
+            go.AddComponent<BoxCollider2D>();
+            if (rock) LevelArt.Visual(go, rock, 1.3f);
+        }
+        var dim = ArtLib.Whole("Items/Rune");
+        var lit = ArtLib.Whole("Items/RuneLit");
+        foreach (var r in L.runes ?? new RuneData[0])
+        {
+            var go = new GameObject("Rune " + (r.order + 1));
+            go.transform.SetParent(root, false);
+            go.transform.position = L.CellCenter(r.cell);
+            var stone = go.AddComponent<SpriteRenderer>();
+            stone.sprite = dim;
+            stone.sortingOrder = LevelArt.GroundOrder;
+            go.transform.localScale = Vector3.one * 2f;
+            var num = new GameObject("Numeral").AddComponent<SpriteRenderer>();
+            num.transform.SetParent(go.transform, false);
+            num.transform.localPosition = new Vector3(0f, 0.15f, 0f);
+            num.transform.localScale = Vector3.one * 1.5f; // big enough to read in the zoomed-out overview
+            num.sprite = ArtLib.Whole("Items/Rune" + (r.order + 1));
+            num.sharedMaterial = SpriteFactory.Unlit; // readable in the overview, whatever the light
+            num.sortingOrder = 2000;
+            num.color = new Color(1f, 1f, 1f, 0f);
+            var rs = go.AddComponent<RuneStone>();
+            rs.cell = r.cell.V;
+            rs.order = r.order;
+            rs.stone = stone;
+            rs.numeral = num;
+            rs.dim = dim;
+            rs.lit = lit;
+            Atmosphere.Glow(go, new Color(0.75f, 0.5f, 1f), 1.4f, 0.5f, 0.3f);
+        }
+    }
+
     static bool Vertical(Edge e) => e.a.V.y == e.b.V.y; // same row: the edge lies in a vertical wall
 
     // A colored bar across the edge between two cells, with a collider that EdgeBar switches on and off.
@@ -199,6 +272,8 @@ public static class MazeBuilder
         go.AddComponent<BoxCollider2D>();
         var bar = go.AddComponent<EdgeBar>();
         bar.kind = kind;
+        bar.a = a;
+        bar.b = b;
         return bar;
     }
 

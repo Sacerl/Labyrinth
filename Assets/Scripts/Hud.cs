@@ -6,6 +6,7 @@ using UnityEngine.UI;
 public class Hud : MonoBehaviour
 {
     Image[] hpBoxes;
+    Sprite heartFull, heartEmpty, heartGold;
     Text levelText, statusText, hintText, centerText, inventoryText;
     GameObject hintPanel, centerPanel;
     Coroutine hintRoutine, centerRoutine;
@@ -30,23 +31,30 @@ public class Hud : MonoBehaviour
     {
         var hpLabel = MakeText("HP", new Vector2(0, 1), new Vector2(40, -40), 40, TextAnchor.UpperLeft);
         hpLabel.rectTransform.sizeDelta = new Vector2(80, 50);
-        hpBoxes = new Image[maxHp];
-        for (int i = 0; i < maxHp; i++)
+        heartFull = ArtLib.Whole("Items/HudHeart");
+        heartEmpty = ArtLib.Whole("Items/HudHeartEmpty");
+        heartGold = ArtLib.Whole("Items/HudHeartGold");
+        hpBoxes = new Image[maxHp + 1]; // the last one: the ♥'s extra HP, only shown while you have it
+        for (int i = 0; i <= maxHp; i++)
         {
             var box = new GameObject("HP", typeof(RectTransform), typeof(Image));
             box.transform.SetParent(transform, false);
             var rt = (RectTransform)box.transform;
             rt.anchorMin = rt.anchorMax = rt.pivot = new Vector2(0, 1);
-            rt.anchoredPosition = new Vector2(120 + i * 48, -44);
-            rt.sizeDelta = new Vector2(38, 38);
+            rt.anchoredPosition = new Vector2(120 + i * 54, -42);
+            rt.sizeDelta = new Vector2(45, 40); // 9×8 pixel heart, 5× up
             hpBoxes[i] = box.GetComponent<Image>();
+            hpBoxes[i].preserveAspect = true;
         }
         inventoryText = MakeText("", new Vector2(0, 1), new Vector2(40, -100), 28, TextAnchor.UpperLeft);
         inventoryText.rectTransform.sizeDelta = new Vector2(700, 90);
         inventoryText.supportRichText = true;
         var top = Panel("Top", new Vector2(0.5f, 1), new Vector2(0, -20), new Vector2(520, 110));
+        top.GetComponent<Image>().enabled = false; // no box behind the level name: the text glows instead
         levelText = MakeText("", new Vector2(0.5f, 1), new Vector2(0, -8), 40, TextAnchor.UpperCenter, top.transform);
         statusText = MakeText("", new Vector2(0.5f, 1), new Vector2(0, -58), 30, TextAnchor.UpperCenter, top.transform);
+        Glow(levelText);
+        Glow(statusText);
         levelText.rectTransform.sizeDelta = statusText.rectTransform.sizeDelta = new Vector2(500, 50);
 
         hintPanel = Panel("Hint", new Vector2(0.5f, 0), new Vector2(0, 40), new Vector2(1400, 110));
@@ -92,10 +100,29 @@ public class Hud : MonoBehaviour
         return t;
     }
 
-    public void SetHp(int hp)
+    public void SetHp(int hp, bool bonus = false)
     {
-        for (int i = 0; i < hpBoxes.Length; i++)
-            hpBoxes[i].color = i < hp ? new Color(0.88f, 0.19f, 0.19f) : new Color(1, 1, 1, 0.25f);
+        int max = hpBoxes.Length - 1;
+        for (int i = 0; i < max; i++)
+            hpBoxes[i].sprite = i < hp ? heartFull : heartEmpty;
+        hpBoxes[max].sprite = heartGold;
+        hpBoxes[max].enabled = bonus;
+    }
+
+    // A soft warm halo instead of a backdrop: a thin dark edge for contrast, two faint lantern-coloured rings.
+    static void Glow(Text t)
+    {
+        var go = t.gameObject;
+        var edge = go.GetComponent<Outline>();
+        edge.effectColor = new Color(0f, 0f, 0f, 0.45f);
+        edge.effectDistance = new Vector2(1f, -1f);
+        foreach (var (alpha, dist) in new[] { (0.12f, 2f), (0.05f, 3.5f) })
+        {
+            var ring = go.AddComponent<Outline>();
+            ring.effectColor = new Color(1f, 0.82f, 0.5f, alpha);
+            ring.effectDistance = new Vector2(dist, -dist);
+            ring.useGraphicAlpha = true;
+        }
     }
 
     public void SetLevel(string name) => levelText.text = name;
@@ -113,9 +140,16 @@ public class Hud : MonoBehaviour
     }
     public void SetStatus(string s) => statusText.text = s;
 
+    // An empty text hides the hint right away.
     public void ShowHint(string text, float seconds = 6f)
     {
         if (hintRoutine != null) StopCoroutine(hintRoutine);
+        if (text.Length == 0)
+        {
+            hintText.text = "";
+            hintPanel.SetActive(false);
+            return;
+        }
         hintRoutine = StartCoroutine(Timed(hintPanel, hintText, text, seconds));
     }
 

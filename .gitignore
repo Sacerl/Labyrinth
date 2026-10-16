@@ -17,6 +17,7 @@
 .idea/
 *.csproj
 *.sln
+*.slnx
 *.suo
 *.user
 *.pidb

@@ -1,12 +1,13 @@
 using UnityEngine;
 
 // Test tool: plays each level's solver solution (from levels.json) with real game input: walking, pushing,
-// pulling (E held) and flipping the lever (E press). Fights cost no HP while it runs.
+// pulling (E held), flipping the lever and unlocking doors (E press). Fights cost no HP while it runs.
 // Add it to any GameObject in Play mode; Status says how far it got.
 public class Autopilot : MonoBehaviour
 {
     public string Status { get; private set; } = "starting";
     public int LevelsCompleted { get; private set; }
+    public int StopAtStep = -1; // freezes the game (timeScale 0) once this solution step is reached, for inspection
 
     LevelData level;
     int step;
@@ -42,12 +43,19 @@ public class Autopilot : MonoBehaviour
             return;
         }
 
+        if (StopAtStep >= 0 && step >= StopAtStep)
+        {
+            Time.timeScale = 0f;
+            GameInput.MoveOverride = Vector2.zero;
+            return;
+        }
+
         Vector2Int target;
         bool pull = false;
         if (step < level.solution.Length)
         {
             var s = level.solution[step];
-            if (s.toggle)
+            if (s.toggle || s.unlock)
             {
                 GameInput.PendingPresses = 1;
                 step++;

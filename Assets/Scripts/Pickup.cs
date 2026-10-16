@@ -24,7 +24,7 @@ public class Pickup : MonoBehaviour
         switch (kind)
         {
             case Kind.Heart:
-                gm.Heal(1);
+                gm.CollectHeart();
                 break;
             case Kind.Goal:
                 gm.ReachGoal();

@@ -1,50 +1,73 @@
 """Labyrinth level generator: paper prototype (Excalidraw) + Unity export (levels.json).
 
-Usage: python3 Tools/gen_levels.py levels-plan.excalidraw [Assets/Resources/levels.json]
+Usage: python3 Tools/gen_levels.py levels-plan.excalidraw [Assets/Resources/levels.json] [--search]
+  Without --search the seeds in Tools/seeds.json are used (fast); --search looks for new ones (slow, scores
+  several candidates per level and keeps the hardest) and writes them there.
 
-Every level is verified: S→Z solvable (Sokoban-style solver over player, boxes, keys, lever),
-every puzzle gate really blocks the way, must-fight enemies can't be avoided, patrols can.
+Every level is verified: S→Z solvable (Sokoban-style solver in Tools/puzzles.py over player, boxes, keys, doors,
+lever, runes, ice), every puzzle gate really blocks the way, must-fight enemies can't be avoided, patrols can.
+Puzzle rooms (Eishalle, Platten, Hebelkammer, Wächtergang) are cuts on the route, solved on their own and spliced in.
 """
-import json, random, sys
+import json, os, random, sys, time
 from collections import deque
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from puzzles import (DIRS, E, solve, empty_puzzle, ice_room, plates_room, lever_room, guard_room, transforms,
+                     GUARD_CELLS, GUARD_EDGES, GUARD_OPEN, grid_edges)
 
 CAM_W, CAM_H = 5, 3  # camera view in maze cells
 KEY_COLORS = ["#f59f00", "#1c7ed6"]
 KEY_NAMES = ["gelb", "blau"]
 PLATE_COLOR, LEVER_COLOR, SWITCH_B_COLOR = "#0ca678", "#7048e8", "#ae3ec9"
+RUNE_COLOR, ICE_COLOR, ROCK_COLOR = "#9c36b5", "#d0ebff", "#868e96"
+RUNE_LETTERS = "ABCD"
+ROOM_NAMES = {"ice": "Eishalle", "plates": "Zwei Platten", "lever": "Hebelkammer", "guard": "Wächtergang"}
+SEEDS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "seeds.json")
 
 LEVELS = [
     # forced: route fractions of must-fight patrols · deep: (min depth, count) of dead ends
-    # gates: puzzles on the route in order (kind, route fraction)
+    # gates: puzzles on the route in order (kind, route fraction); a door's key lies in the farthest dead end
+    #        you can reach before it; "rune": `runes` rune stones off the route, stepped on in order (A, B, …)
+    #        open it — the order is only shown at the level start
+    # rooms: puzzle rooms on the route (kind, tier, (h, w)); see Tools/puzzles.py
     # abilities: picked up in this level · start_abilities: carried over from earlier levels
-    # tier/waves: fight difficulty (0 = tutorial … 3.5 = finale)
-    # fetch: min depth of the dead end holding a key/lever, which also must lie off-screen from its gate
-    #        (default: key 3, lever 2 — the solution sits right beside the obstacle, fine for teaching)
+    # tier/waves: fight difficulty (0 = tutorial … 2.3 = finale; must-fight enemies get +0.3 in the game)
+    # exit: (name, region) — Z is a one-way dead end inside the region, S the maze corner farthest from it;
+    #       without it S is bottom left, Z top right. min_route: the S→Z way (+ room areas) keeps 80 % of this
+    #       min_steps: the whole solution at least 95 % of it (both from the old bottom-left → top-right layout)
     dict(name="Tutorial", W=8, H=5, loops=2, forced=[0.7], avoid=1, deep=(3, 1), tutorial=True, patrol_len=2,
          gates=[("box", 0.35)], tier=0, waves=1,
          new="Bewegen, Kämpfe, Kisten schieben", known="–"),
     dict(name="1 – Schlüssel", W=12, H=8, loops=2, forced=[0.35], avoid=2, deep=(5, 2),
-         gates=[("door", 0.55), ("box", 0.8)], tier=0.7, waves=2,
-         new="Schlüssel + Türen", known="Kisten"),
+         gates=[("door", 0.55), ("box", 0.8)], rooms=[("ice", 1, (3, 4))], tier=0.7, waves=2,
+         exit=("unten rechts", lambda r, c, W, H: r == H - 1 and c >= W // 2), min_route=35, min_steps=42,
+         new="Schlüssel + Türen, Eishalle", known="Kisten"),
     dict(name="2 – Handschuh", W=14, H=9, loops=3, forced=[0.25, 0.7], avoid=2, deep=(5, 3), lurker=True,
-         gates=[("plate", 0.45), ("door", 0.8)], abilities=["pull"], tier=1.4, waves=3,
-         new="Ziehen (Handschuh) + Druckplatte", known="Kisten, Schlüssel"),
+         gates=[("plate", 0.45), ("door", 0.8)], rooms=[("guard", 1, None)], abilities=["pull"], tier=1.3, waves=3,
+         exit=("oben links", lambda r, c, W, H: r <= 1 and c <= W // 3), min_route=76, min_steps=123,
+         new="Ziehen (Handschuh) + Druckplatte, Wächtergang", known="Kisten, Schlüssel, Eis"),
     dict(name="3 – Hebel", W=16, H=10, loops=4, forced=[0.2, 0.62], avoid=3, deep=(6, 3), lurker=True,
-         gates=[("door", 0.25), ("door", 0.45), ("plate", 0.62), ("lever", 0.82)], start_abilities=["pull"], fetch=5,
-         tier=2.1, waves=3, new="Hebel + Wände A/B, zwei Türen", known="Kisten, Ziehen, Druckplatte"),
-    dict(name="4 – Schild", W=18, H=11, loops=4, forced=[0.2, 0.42, 0.62], avoid=3, deep=(7, 3), lurker=True,
-         gates=[("plate", 0.3), ("door", 0.5), ("lever", 0.8)], start_abilities=["pull"], abilities=["shield"], fetch=6,
-         tier=2.8, waves=3, new="Schild (im Kampf)", known="Kisten, Schlüssel, Ziehen, Platte, Hebel"),
-    dict(name="5 – Finale", W=20, H=12, loops=5, forced=[0.2, 0.42, 0.6], avoid=4, deep=(8, 3), lurker=True,
-         bang=True, gates=[("door", 0.3), ("door", 0.5), ("plate", 0.7), ("lever", 0.8)], fetch=7,
-         start_abilities=["pull", "shield"], tier=3.5, waves=3,
+         gates=[("door", 0.25), ("plate", 0.5), ("rune", 0.8)], runes=3, rooms=[("lever", 1, (4, 5))],
+         start_abilities=["pull"],
+         exit=("unten Mitte", lambda r, c, W, H: r >= H - 2 and W // 4 <= c < 3 * W // 4), min_route=87, min_steps=153,
+         tier=1.7, waves=3, new="Hebelkammer, Runen (3)", known="Kisten, Ziehen, Platte, Eis, Wächter"),
+    dict(name="4 – Schild", W=21, H=13, loops=4, forced=[0.2, 0.42, 0.62], avoid=3, deep=(7, 3), lurker=True,
+         gates=[("door", 0.5)], rooms=[("plates", 1, (4, 4)), ("ice", 2, (4, 5)), ("guard", 2, None)],
+         start_abilities=["pull"], abilities=["shield"],
+         exit=("links Mitte", lambda r, c, W, H: c <= 1 and H // 4 <= r < 3 * H // 4), min_route=112, min_steps=163,
+         tier=2.0, waves=3, new="Schild, zwei Platten – eine Kiste", known="alles bisher"),
+    dict(name="5 – Finale", W=22, H=14, loops=5, forced=[0.2, 0.42, 0.6], avoid=4, deep=(8, 3), lurker=True,
+         bang=True, gates=[("door", 0.3), ("rune", 0.6)], runes=4,
+         rooms=[("lever", 2, (4, 5)), ("plates", 2, (4, 4)), ("ice", 3, (4, 5))],
+         start_abilities=["pull", "shield"], tier=2.3, waves=3,
+         exit=("Mitte", lambda r, c, W, H: abs(r - (H - 1) / 2) <= 1 and abs(c - (W - 1) / 2) <= 1.5), min_route=125, min_steps=216,
          new="alles kombiniert + Doppelkampf (!)", known="alles"),
 ]
+KEY_MIN_DIST = 12  # a key lies at least this many steps away from its door
 SEE_FIRST = 3  # the obstacle must have been on screen before you pick up its solution
-FAR_CAP = 6  # with fetch: key/lever at least min(fetch, FAR_CAP) cells from its gate as the crow flies (7 fits no finale)
+FAR_CAP = 6  # with fetch: lever at least min(fetch, FAR_CAP) cells from its gate as the crow flies
 
 # --- maze logic --------------------------------------------------------------
-DIRS = ((1, 0), (-1, 0), (0, 1), (0, -1))
 
 def nbrs4(r, c, W, H):
     for dr, dc in DIRS:
@@ -75,28 +98,123 @@ def has_floating_wall(adj, W, H):
                 seen.add(n); q.append(n)
     return len(seen) != len(g)
 
-def make_maze(W, H, loops, rnd):
+def place_rooms(W, H, specs, rnd):
+    """Puzzle rooms: cells, two openings (room cell, outside cell) and the walls inside (None = open floor)."""
+    rooms, halo = [], set()
+    for kind, tier, size in specs:
+        for _ in range(300):
+            if kind == "guard":
+                f = rnd.choice(transforms())
+                offs = {n: f(o) for n, o in GUARD_CELLS.items()}
+                h = max(r for r, c in offs.values()) - min(r for r, c in offs.values()) + 1
+                w = max(c for r, c in offs.values()) - min(c for r, c in offs.values()) + 1
+                if h > H - 2 or w > W - 2:
+                    continue
+                r0, c0 = rnd.randint(1, H - h - 1), rnd.randint(1, W - w - 1)
+                mr, mc = min(r for r, c in offs.values()), min(c for r, c in offs.values())
+                names = {n: (r0 + r - mr, c0 + c - mc) for n, (r, c) in offs.items()}
+                opens = [(names[n], add_(names[n], f(d))) for n, d in GUARD_OPEN]
+                inner = [(names[a], names[b]) for a, b in GUARD_EDGES]
+            else:
+                h, w = size if rnd.random() < 0.5 else size[::-1]
+                if h > H - 2 or w > W - 2:
+                    continue
+                r0, c0 = rnd.randint(1, H - h - 1), rnd.randint(1, W - w - 1)
+                cells = [(r, c) for r in range(r0, r0 + h) for c in range(c0, c0 + w)]
+                sides = rnd.sample([(-1, 0), (1, 0), (0, -1), (0, 1)], 2)
+                opens = []
+                for d in sides:
+                    edge = [p for p in cells if add_(p, d) not in cells]
+                    p = rnd.choice(edge)
+                    opens.append((p, add_(p, d)))
+                names, inner = None, grid_edges(cells)
+            cells = set(names.values()) if names else set(cells)
+            outside = {o for _, o in opens}
+            if (cells | outside) & halo or any(not (0 <= o[0] < H and 0 <= o[1] < W) for o in outside):
+                continue  # rooms keep a cell of maze between them, and nobody's doorstep lies in another room
+            rooms.append(dict(kind=kind, tier=tier, cells=cells, opens=opens, inner=inner, names=names))
+            halo |= cells | outside | {add_(p, d) for p in cells for d in DIRS}
+            break
+        else:
+            return None
+    return rooms
+
+
+add_ = lambda p, d: (p[0] + d[0], p[1] + d[1])
+
+
+def room_bypassed(adj, rm):
+    (_, o1), (_, o2) = rm["opens"]
+    return o2 in bfs(adj, o1, frozenset(rm["cells"]))
+
+
+def make_maze(W, H, loops, rnd, specs=(), region=None):
+    """A maze (spanning tree + `loops`) around the puzzle rooms. Each room becomes a cut: the only way between its
+    two sides. With an exit `region`, every room separates a start corner from a cell in that region, so that all
+    rooms lie on the way from start to exit."""
+    rooms = place_rooms(W, H, specs, rnd) if specs else []
+    if rooms is None:
+        return None
+    in_room = {c for rm in rooms for c in rm["cells"]}
+    pairs = [None]
+    if rooms and region:
+        busy = in_room | {add_(c, d) for c in in_room for d in DIRS}
+        corners = [c for c in ((H - 1, 0), (0, 0), (H - 1, W - 1), (0, W - 1)) if c not in busy]
+        targets = [(r, c) for r in range(H) for c in range(W) if region(r, c, W, H) and (r, c) not in busy]
+        if not corners or not targets:
+            return None
+        pairs = [(rnd.choice(corners), rnd.choice(targets)) for _ in range(12)]
     adj = {(r, c): set() for r in range(H) for c in range(W)}
-    stack, seen = [(H - 1, 0)], {(H - 1, 0)}
+    start = (H - 1, 0) if (H - 1, 0) not in in_room else next(c for c in adj if c not in in_room)
+    stack, seen = [start], {start}
     while stack:
         cur = stack[-1]
-        opts = [n for n in nbrs4(*cur, W, H) if n not in seen]
+        opts = [n for n in nbrs4(*cur, W, H) if n not in seen and n not in in_room]
         if not opts:
             stack.pop(); continue
         n = rnd.choice(opts)
         adj[cur].add(n); adj[n].add(cur); seen.add(n); stack.append(n)
-    closed = [(a, b) for a in adj for b in nbrs4(*a, W, H) if a < b and b not in adj[a]]
+    if len(seen) + len(in_room) != W * H:
+        return None
+    tree = adj
+    for ends in pairs:  # a start corner and an exit cell every room can be made to lie between
+        adj = {c: set(n) for c, n in tree.items()}
+        for rm in rooms:
+            for a, b in rm["inner"] + [o for o in rm["opens"]]:
+                adj[a].add(b); adj[b].add(a)
+            # the room closes a loop with the maze around it: cut that loop, so the room is the only way across
+            while room_bypassed(adj, rm):
+                (_, o1), (_, o2) = rm["opens"]
+                path = path_to(bfs(adj, o1, frozenset(rm["cells"])), o2)
+                cand = [(a, b) for a, b in zip(path, path[1:]) if a not in in_room and b not in in_room]
+                if ends:  # cut where it puts the start corner and the exit cell on different sides of the room
+                    cand = [(a, b) for a, b in cand
+                            if ends[1] not in bfs(adj, ends[0], frozenset(rm["cells"]), frozenset([E(a, b)]))]
+                if not cand:
+                    break
+                a, b = rnd.choice(cand)
+                adj[a].discard(b); adj[b].discard(a)
+            if room_bypassed(adj, rm):
+                break
+        else:
+            break
+    else:
+        return None
+    if len(bfs(adj, start)) != W * H:
+        return None
+    closed = [(a, b) for a in adj for b in nbrs4(*a, W, H) if a < b and b not in adj[a]
+              and a not in in_room and b not in in_room]
     rnd.shuffle(closed)
     added = 0
     for a, b in closed:
         if added == loops:
             break
         adj[a].add(b); adj[b].add(a)
-        if has_floating_wall(adj, W, H):
+        if has_floating_wall(adj, W, H) or any(room_bypassed(adj, rm) for rm in rooms):
             adj[a].discard(b); adj[b].discard(a)
         else:
             added += 1
-    return adj if added == loops else None
+    return (adj, rooms) if added == loops else None
 
 def bfs(adj, start, blocked=frozenset(), blocked_edges=frozenset()):
     prev, q = {start: None}, deque([start])
@@ -156,73 +274,6 @@ def side_branches(adj, route):
 def manhattan_near(a_cells, b_cells, d):
     return any(abs(a[0] - b[0]) + abs(a[1] - b[1]) < d for a in a_cells for b in b_cells)
 
-E = lambda a, b: frozenset((a, b))
-
-# --- puzzle solver -------------------------------------------------------------
-def solve(adj, S, Z, P, start_pull, glove=True, limit=400_000, via=None):
-    """BFS over (player, boxes, keys, lever, has_pull). Returns the states of a shortest solution, or None.
-    With `via`, that cell must be visited on the way to Z (the heart: reachable without breaking the level).
-
-    Doors open with their key; plate gates are open while a box sits on the plate; switch walls:
-    set A is closed at lever 0, set B is closed at lever 1. Standing on the lever toggles it (an action).
-    Pulling needs the Pull ability: from the start, or picked up on the glove cell (unless glove=False)."""
-    doors = {E(*d["edge"]): d["color"] for d in P["doors"]}
-    gates = {E(*g["edge"]): g["plate"] for g in P["plates"]}
-    sw_a = {E(*e) for e in P["switch_a"]}
-    sw_b = {E(*e) for e in P["switch_b"]}
-    keys_at = {k["cell"]: k["color"] for k in P["keys"]}
-    lever = P["lever"]
-    glove_at = P["glove"] if glove else None
-
-    def passable(a, b, keys, boxes, lev):
-        if b not in adj[a]:
-            return False
-        e = E(a, b)
-        if e in doors and doors[e] not in keys: return False
-        if e in gates and gates[e] not in boxes: return False
-        if e in sw_a and lev == 0: return False
-        if e in sw_b and lev == 1: return False
-        return True
-
-    start = (S, frozenset(P["boxes"]), frozenset(), 0, start_pull)
-    if via is not None:
-        start = start + (False,)
-    prev = {start: None}
-    q = deque([start])
-    while q:
-        st = q.popleft()
-        p, boxes, keys, lev, pull = st[:5]
-        if p == Z and (via is None or st[5]):
-            out = []
-            while st is not None:
-                out.append(st[:5]); st = prev[st]
-            return out[::-1]
-        if len(prev) > limit:
-            return None
-        nxt = []
-        if p == lever:
-            nxt.append((p, boxes, keys, 1 - lev, pull))
-        for dr, dc in DIRS:
-            q1 = (p[0] + dr, p[1] + dc)
-            if q1 not in adj or not passable(p, q1, keys, boxes, lev):
-                continue
-            k1 = keys | {keys_at[q1]} if q1 in keys_at else keys
-            pull1 = pull or q1 == glove_at
-            if q1 in boxes:  # push
-                q2 = (q1[0] + dr, q1[1] + dc)
-                if q2 in adj and q2 not in boxes and passable(q1, q2, keys, boxes, lev):
-                    nxt.append((q1, boxes - {q1} | {q2}, k1, lev, pull1))
-                continue
-            nxt.append((q1, boxes, k1, lev, pull1))
-            back = (p[0] - dr, p[1] - dc)
-            if pull and back in boxes and passable(back, p, keys, boxes, lev):
-                nxt.append((q1, boxes - {back} | {p}, k1, lev, pull1))
-        for s in nxt:
-            if via is not None:
-                s = s + (st[5] or s[0] == via,)
-            if s not in prev:
-                prev[s] = st; q.append(s)
-    return None
 
 def box_reach(adj, player, box, pull, blocked_edges):
     """Cells one box can be moved to (push, optionally pull), with the given edges closed."""
@@ -251,43 +302,108 @@ def box_reach(adj, player, box, pull, blocked_edges):
     return cells
 
 # --- level design ---------------------------------------------------------------
+def start_and_exit(L, adj, avoid=frozenset(), rooms=()):
+    """Without an exit region: bottom left → top right. With one: Z is the one-way dead end in the region with the
+    longest way to it, S the maze corner (with rooms: or dead end on the border) that way starts from; every puzzle
+    room has to lie between them."""
+    W, H = L["W"], L["H"]
+    if "exit" not in L:
+        return (H - 1, 0), (0, W - 1)
+    region = L["exit"][1]
+    best = None
+    corners = [(H - 1, 0), (0, 0), (H - 1, W - 1), (0, W - 1)]
+    edge_ends = [c for c in adj if len(adj[c]) == 1 and c not in corners and (c[0] in (0, H - 1) or c[1] in (0, W - 1))]
+    for S in corners + (edge_ends if rooms else []):
+        if S in avoid:
+            continue
+        dist = bfs(adj, S)
+        beyond = [set(bfs(adj, S, frozenset(rm["cells"]))) for rm in rooms]  # what S reaches without the room
+        for Z in adj:
+            if region(*Z, W, H) and len(adj[Z]) == 1 and Z != S and Z not in avoid \
+                    and not any(Z in reach for reach in beyond):
+                n = len(path_to(dist, Z))
+                if best is None or n > best[0]:
+                    best = (n, S, Z)
+    return best[1:] if best else (None, None)
+
+def start_view(S, W, H):
+    """Top-left cell of the camera view at the start (5×3 cells, stopped at the maze edge)."""
+    return (min(max(S[0] - CAM_H // 2, 0), H - CAM_H), min(max(S[1] - CAM_W // 2, 0), W - CAM_W))
+
+def bfs_dist(adj, start):
+    dist, q = {start: 0}, deque([start])
+    while q:
+        a = q.popleft()
+        for n in adj[a]:
+            if n not in dist:
+                dist[n] = dist[a] + 1; q.append(n)
+    return dist
+
+def steps_of(solution):
+    """Solver solution → [(cell, action)], the first entry is the start (action None)."""
+    return [(st[0], act) for st, act in solution]
+
+def splice(steps, room_steps, o_in, o_out, cells):
+    """Replace the level solution's walk through a room (o_in … o_out) by the room's own solution."""
+    inside = [i for i, (c, _) in enumerate(steps) if c in cells]
+    if not inside:
+        return None
+    i0, i1 = inside[0] - 1, inside[-1] + 1
+    if i1 - i0 - 1 != len(inside) or steps[i0][0] != o_in or steps[i1][0] != o_out:
+        return None  # the way crosses the room more than once, or not through its openings
+    return steps[:i0 + 1] + room_steps[1:] + steps[i1 + 1:]
+
 def design(L, seed):
     rnd = random.Random(seed)
     W, H = L["W"], L["H"]
-    adj = make_maze(W, H, L["loops"], rnd)
-    if adj is None:
+    built = make_maze(W, H, L["loops"], rnd, L.get("rooms", ()), L["exit"][1] if "exit" in L else None)
+    if built is None:
         return None
-    S, Z = (H - 1, 0), (0, W - 1)
+    adj, rooms = built
+    room_cells = {c for rm in rooms for c in rm["cells"]}
+    doorstep = {o for rm in rooms for _, o in rm["opens"]}
+    S, Z = start_and_exit(L, adj, room_cells | doorstep, rooms)
+    if S is None:
+        return None
     if len(bfs(adj, S, frozenset([Z]))) != W * H - 1:
         return None  # nothing may lie behind the exit: touching Z ends the level
     route = path_to(bfs(adj, S), Z)
     n = len(route)
+    if n + len(room_cells) < 0.8 * L.get("min_route", 0):
+        return None  # the way to the exit stays as long as it was (a room counts with its area: its puzzle)
     idx = {p: i for i, p in enumerate(route)}
-    cut = {p for p in route[1:-1] if Z not in bfs(adj, S, frozenset([p]))}
-    bridges = [i for i in range(n - 1)
-               if Z not in bfs(adj, S, blocked_edges=frozenset([E(route[i], route[i + 1])]))]
+    for rm in rooms:  # every room lies on the way: entered from the S side
+        (e1, o1), (e2, o2) = rm["opens"]
+        if o1 not in idx or o2 not in idx or not rm["cells"] & set(route):
+            return None
+        rm["in"], rm["out"] = ((e1, o1), (e2, o2)) if idx[o1] < idx[o2] else ((e2, o2), (e1, o1))
+    blocked_route = room_cells | doorstep
+    cut = {p for p in route[1:-1] if p not in blocked_route and Z not in bfs(adj, S, frozenset([p]))}
+    bridges = [i for i in range(n - 1) if route[i] not in blocked_route and route[i + 1] not in blocked_route
+               and Z not in bfs(adj, S, blocked_edges=frozenset([E(route[i], route[i + 1])]))]
 
-    branches = side_branches(adj, route)
+    branches = [b for b in side_branches(adj, route) if not b["cells"] & room_cells]
     dmin, dcount = L["deep"]
     deep = [b for b in branches if b["depth"] >= dmin]
     if len(deep) < dcount:
         return None
-    in_start_view = lambda p: p[0] >= H - CAM_H and p[1] < CAM_W
+    view = start_view(S, W, H)
+    in_start_view = lambda p: view[0] <= p[0] < view[0] + CAM_H and view[1] <= p[1] < view[1] + CAM_W
     heart_branch = max((b for b in deep if not in_start_view(b["far"])), key=lambda b: b["depth"], default=None)
     if heart_branch is None:
         return None
     heart = heart_branch["far"]
-    taken = {S, Z, heart}
+    taken = {S, Z, heart} | room_cells | doorstep
     used_branches = [heart_branch]
 
     # 1. gates along the route, in order
     gates = []  # dict(kind, i) — gate sits between route[i] and route[i+1] (box: on route[i])
     gets_pull_here = "pull" in L.get("abilities", [])
-    need_beside = {"door": L.get("fetch", 3), "lever": L.get("fetch", 2), "plate": 3 if gets_pull_here else 0}
-    far_off = "fetch" in L  # the key/lever must not be visible from its gate
+    need_beside = {"door": 0, "rune": 0, "lever": L.get("fetch", 2), "plate": 3 if gets_pull_here else 0}
+    far_off = "fetch" in L  # the lever must not be visible from its gate
 
     def off_screen(b, i):
-        """With fetch: the key/lever is out of sight of its gate and not just behind a wall from it."""
+        """With fetch: the lever is out of sight of its gate and not just behind a wall from it."""
         return not far_off or (not (on_screen(route[i], [b["far"]]) or on_screen(route[i + 1], [b["far"]]))
                                and not manhattan_near([b["far"]], route[i:i + 2], min(L["fetch"], FAR_CAP)))
 
@@ -333,10 +449,12 @@ def design(L, seed):
 
     has_pull_start = "pull" in L.get("start_abilities", [])
     gets_pull = "pull" in L.get("abilities", [])
+    from_S = bfs_dist(adj, S)
 
     # 2. puzzle parts for each gate
-    P = dict(boxes=[], keys=[], doors=[], plates=[], switch_a=[], switch_b=[], lever=None, glove=None,
-             plate_candidates=[], order=[])
+    P = empty_puzzle()
+    P["boxes"], P["keys"], P["doors"], P["plates"] = [], [], [], []
+    P["switch_a"], P["switch_b"], P["runes"], P["rune_gates"] = [], [], [], []
     door_no = 0
     for k, g in enumerate(gates):
         i = g["i"]
@@ -344,15 +462,38 @@ def design(L, seed):
         if g["kind"] == "box":
             P["boxes"].append(a)
         elif g["kind"] == "door":
-            pool = beside_gate(k, i, need_beside["door"])
+            # the key lies in the dead end farthest from its door that you can reach before it
+            pool = free_branches(k, 1)
             if not pool:
                 return None
-            br = max(pool, key=lambda br: br["depth"]); used_branches.append(br)
+            from_door = bfs_dist(adj, a)
+            br = max(pool, key=lambda br: from_door[br["far"]]); used_branches.append(br)
+            if from_door[br["far"]] < KEY_MIN_DIST:
+                return None
             color = KEY_COLORS[door_no]; door_no += 1
             P["keys"].append(dict(cell=br["far"], color=color))
             P["doors"].append(dict(edge=(a, b), color=color))
             P["order"].append(dict(color=color, steps=[("door", (a, b)), ("key", br["far"])]))
             taken.add(br["far"])
+        elif g["kind"] == "rune":
+            # rune stones in dead ends, spread out; the order differs from the order you pass them in
+            pool = free_branches(k, 1)
+            if len(pool) < L["runes"]:
+                return None
+            chosen = [rnd.choice(pool)]
+            while len(chosen) < L["runes"]:
+                chosen.append(max((br for br in pool if all(br is not c for c in chosen)),
+                                  key=lambda br: min(abs(br["far"][0] - c["far"][0]) + abs(br["far"][1] - c["far"][1])
+                                                     for c in chosen)))
+            cells = [br["far"] for br in chosen]
+            natural = sorted(cells, key=lambda c: from_S[c])
+            order = cells[:]
+            while order == natural or order == natural[::-1]:
+                rnd.shuffle(order)
+            P["runes"] = [(c, order.index(c)) for c in cells]
+            P["rune_gates"].append((a, b))
+            used_branches += chosen
+            taken |= set(cells)
         elif g["kind"] == "plate":
             glove_br = None
             if gets_pull:  # the glove lies right next to the closed gate
@@ -403,7 +544,8 @@ def design(L, seed):
     cut_runs = [r for k in (3, 2) for r in straight_runs(adj, W, H, k) if set(r) <= cut]
     for frac in L["forced"]:
         target = frac * n
-        pool = [r for r in cut_runs if abs(idx[r[len(r) // 2]] - target) < 0.12 * n
+        spread = 0.2 if rooms else 0.12  # rooms take up stretches of the route
+        pool = [r for r in cut_runs if abs(idx[r[len(r) // 2]] - target) < spread * n
                 and not manhattan_near(r, taken, 2)]
         if not pool:
             return None
@@ -452,7 +594,34 @@ def design(L, seed):
     if len(patrols) < L["avoid"] or not any(set(r) & relevant for r in patrols):
         return None
 
-    # 5. solve (picking a working plate spot if the level has a plate gate)
+    # 5. the puzzle rooms' contents (now that the way through each is known)
+    room_of = {c: ri for ri, rm in enumerate(rooms) for c in rm["cells"]}
+    for ri, rm in enumerate(rooms):
+        (e_in, o_in), (e_out, o_out) = rm["in"], rm["out"]
+        frame = (sorted(rm["cells"]), o_in, e_in, o_out, e_out)
+        if rm["kind"] == "ice":
+            content = ice_room(frame, rnd, rm["tier"])
+        elif rm["kind"] == "plates":
+            content = plates_room(frame, rnd, rm["tier"], has_pull_start)
+        elif rm["kind"] == "lever":
+            content = lever_room(frame, rnd, rm["tier"], has_pull_start)
+        else:
+            content = guard_room(frame + (rm["names"],), rm["tier"], has_pull_start)
+        if content is None:
+            return None
+        rm["content"] = content
+        for a in rm["cells"]:
+            for b in list(adj[a]):
+                if b in rm["cells"]:
+                    adj[a].discard(b)
+        for a, b in content["edges"]:
+            adj[a].add(b); adj[b].add(a)
+    if has_floating_wall(adj, W, H):
+        return None
+    P["rocks"] = frozenset(c for rm in rooms for c in rm["content"]["P"]["rocks"])
+    P["room_of"] = room_of
+
+    # 6. solve (picking a working plate spot if the level has a plate gate); rooms count as plain floor here
     candidates = P["plate_candidates"] if P["plates"] else [None]
     solution = None
     for plate in candidates:
@@ -467,18 +636,26 @@ def design(L, seed):
         return None  # the glove must be necessary
     if not solve(adj, S, Z, P, has_pull_start, via=heart):
         return None  # the heart must be reachable with what you have, without making the level unsolvable
+    steps = steps_of(solution)
+    for rm in rooms:
+        steps = splice(steps, steps_of(rm["content"]["solution"]), rm["in"][1], rm["out"][1], rm["cells"])
+        if steps is None:
+            return None
+    unlocks = sum(a == "unlock" for _, a in steps)
+    if len(steps) - 1 - unlocks < L.get("min_steps", 0):
+        return None
 
     # "see it, then get it": each obstacle was on screen before its solution is picked up
-    events = see_then_get(solution, P)
+    events = see_then_get([st for st, _ in solution], P)
     if events is None:
         return None
 
-    # 6. checks
+    # 7. checks
     assert not has_floating_wall(adj, W, H)
     for d in P["doors"] + P["plates"]:
         assert Z not in bfs(adj, S, blocked_edges=frozenset([E(*d["edge"])])), "gate is avoidable"
-    for e in P["switch_a"]:
-        assert Z not in bfs(adj, S, blocked_edges=frozenset([E(*e)])), "lever wall is avoidable"
+    for e in P["switch_a"] + P["rune_gates"]:
+        assert Z not in bfs(adj, S, blocked_edges=frozenset([E(*e)])), "lever/rune wall is avoidable"
     for b in P["boxes"]:
         if b in route:
             assert Z not in bfs(adj, S, frozenset([b])), "blocking box is avoidable"
@@ -486,17 +663,36 @@ def design(L, seed):
         assert all(Z not in bfs(adj, S, frozenset([c])) for c in run), "forced enemy is avoidable"
     for run in patrols:
         assert avoidable(run), "patrol blocks the only route"
+    for rm in rooms:
+        assert not room_bypassed(adj, rm), "room is avoidable"
+
+    # everything together: the level's own parts plus the rooms' (for drawing and export)
+    A = dict(P)
+    for key in ("boxes", "plates", "switch_a", "switch_b", "guards"):
+        A[key] = list(P[key]) + [x for rm in rooms for x in rm["content"]["P"][key]]
+    A["ice"] = frozenset(c for rm in rooms for c in rm["content"]["P"]["ice"])
+    A["lever"] = P["lever"] or next((rm["content"]["P"]["lever"] for rm in rooms if rm["content"]["P"]["lever"]), None)
 
     return dict(adj=adj, S=S, Z=Z, route=route, forced=forced, patrols=patrols, heart=heart, bang=bang,
-                P=P, abilities=abilities, solution=solution, events=events,
+                P=P, A=A, rooms=rooms, abilities=abilities, solution=solution, steps=steps, events=events,
                 deep=sorted(b["depth"] for b in deep))
+
+def score(D):
+    """Option 8: how much thinking a level asks for. Detours (solution vs. the bare way), trap states in the rooms,
+    lever switches and room moves."""
+    s = len(D["steps"]) / len(D["route"])
+    for rm in D["rooms"]:
+        c = rm["content"]
+        s += 0.02 * c["moves"] + 0.01 * min((c.get("dead") or (0, 0))[1], 50) + 0.1 * c.get("toggles", 0)
+    return s
 
 def on_screen(player, cells):
     """Camera rule (5×3 cells around the player): is any of `cells` visible?"""
     return any(abs(c[0] - player[0]) <= CAM_H // 2 and abs(c[1] - player[1]) <= CAM_W // 2 for c in cells)
 
 def see_then_get(solution, P):
-    """Step numbers of 'obstacle seen' and 'solution picked up' per puzzle; None if a solution comes first."""
+    """Step numbers of 'obstacle seen' and 'solution picked up' per puzzle; None if a solution comes first.
+    Keys are exempt: a key may lie far away and be found before its door (the door then says what it needs)."""
     players = [s[0] for s in solution]
     first = lambda pred: next((t for t, p in enumerate(players) if pred(p)), None)
     events = []
@@ -507,7 +703,7 @@ def see_then_get(solution, P):
             if kind not in ("key", "glove", "lever"):
                 continue  # plate puzzles without a glove: the box is visible from the start
             got = first(lambda p: p == cell)
-            if seen is None or got is None or got < seen:
+            if kind != "key" and (seen is None or got is None or got < seen):
                 return None
             events.append((puzzle["color"], seen, got))
     return events
@@ -557,7 +753,8 @@ def simplify(pts):
                        not (pts[i - 1][1] == p[1] == pts[i + 1][1])] + [pts[-1]]
 
 def box_tracks(solution):
-    """Per box: the cells it moves through in the solution."""
+    """Per box: the cells it moves through in the solution ([(state, action)])."""
+    solution = [st for st, _ in solution]
     tracks = {b: [b] for b in solution[0][1]}
     for s0, s1 in zip(solution, solution[1:]):
         b0, b1 = s0[1], s1[1]
@@ -572,7 +769,7 @@ TUTORIAL_HINTS = {
     "S": "Bewegen mit WASD / Pfeiltasten",
     "box": "Kiste: hineinlaufen = schieben, ab in eine Nische",
     "patrol": "Patrouille: Abstand halten, Umweg nehmen",
-    "heart": "♥ einsammeln = +1 HP",
+    "heart": "♥ einsammeln = volle HP + 1 Extra-HP (geht beim nächsten Treffer verloren)",
     "forced": "Pflicht-Kampf (leicht): mit ♥ ausweichen",
     "Z": "Ziel erreichen → Level 1",
 }
@@ -588,20 +785,29 @@ def tutorial_marks(D):
     return sorted(marks, key=lambda m: m[2])
 
 def draw_maze(L, D, X0, Y0):
-    W, H, adj, P = L["W"], L["H"], D["adj"], D["P"]
+    W, H, adj, P, A = L["W"], L["H"], D["adj"], D["P"], D["A"]
     cx = lambda c: X0 + c * CELL + CELL / 2
     cy = lambda r: Y0 + r * CELL + CELL / 2
 
     nf, na = len(D["forced"]), len(D["patrols"])
     text(X0, Y0 - 80, f'{L["name"]}  ({W}×{H})', 28)
     text(X0, Y0 - 46, f'neu: {L["new"]}  ·  bekannt: {L["known"]}', 15, "#1e1e1e")
-    text(X0, Y0 - 24, f"{nf}× Pflicht-Gegner ★ · {na}× Patrouille ●", 14, "#495057")
+    where = L["exit"][0] if "exit" in L else "oben rechts"
+    text(X0, Y0 - 24, f"{nf}× Pflicht-Gegner ★ · {na}× Patrouille ● · Ziel: {where}", 14, "#495057")
 
     for r in range(H + 1):
         line([(X0, Y0 + r * CELL), (X0 + W * CELL, Y0 + r * CELL)], strokeColor="#e9ecef", roughness=0)
     for c in range(W + 1):
         line([(X0 + c * CELL, Y0), (X0 + c * CELL, Y0 + H * CELL)], strokeColor="#e9ecef", roughness=0)
 
+    for r, c in A["ice"]:
+        base("rectangle", X0 + c * CELL, Y0 + r * CELL, CELL, CELL, backgroundColor=ICE_COLOR, strokeColor=ICE_COLOR,
+             fillStyle="solid", roughness=0)
+    for rm in D["rooms"]:
+        rs, cs = [p[0] for p in rm["cells"]], [p[1] for p in rm["cells"]]
+        base("rectangle", X0 + min(cs) * CELL - 5, Y0 + min(rs) * CELL - 5, (max(cs) - min(cs) + 1) * CELL + 10,
+             (max(rs) - min(rs) + 1) * CELL + 10, strokeColor="#1098ad", strokeStyle="dotted", strokeWidth=2, roughness=0)
+        text(X0 + min(cs) * CELL - 3, Y0 + min(rs) * CELL - 22, ROOM_NAMES[rm["kind"]], 13, "#0b7285")
     wall = dict(backgroundColor="#495057", strokeColor="#343a40", fillStyle="hachure", roughness=0)
     for y in range(H + 1):
         c = 0
@@ -648,13 +854,14 @@ def draw_maze(L, D, X0, Y0):
     # route + box solution tracks
     line([(cx(c) - 7, cy(r) + 7) for r, c in simplify(D["route"])], "arrow", strokeColor="#1971c2",
          strokeStyle="dashed", strokeWidth=1.5, roughness=0)
-    for tr in box_tracks(D["solution"]):
+    for tr in [t for sol in [D["solution"]] + [rm["content"]["solution"] for rm in D["rooms"]] for t in box_tracks(sol)]:
         line([(cx(c) + 6, cy(r) - 6) for r, c in simplify(tr)], "arrow", strokeColor="#868e96",
              strokeWidth=1.5, roughness=0)
 
-    base("rectangle", X0 + 2, Y0 + (H - CAM_H) * CELL + 2, CAM_W * CELL - 4, CAM_H * CELL - 4,
+    vr, vc = start_view(D["S"], W, H)
+    base("rectangle", X0 + vc * CELL + 2, Y0 + vr * CELL + 2, CAM_W * CELL - 4, CAM_H * CELL - 4,
          strokeColor="#0c8599", strokeStyle="dashed", strokeWidth=2, roughness=0)
-    text(X0 + 6, Y0 + (H - CAM_H) * CELL + 4, "Kamera", 13, "#0c8599")
+    text(X0 + vc * CELL + 6, Y0 + vr * CELL + 4, "Kamera", 13, "#0c8599")
 
     S, Z = D["S"], D["Z"]
     text(cx(S[1]) + 6, cy(S[0]), "S", 26, "#2f9e44", "center")
@@ -669,20 +876,30 @@ def draw_maze(L, D, X0, Y0):
         base("diamond", cx(c) - 11, cy(r) - 11, 22, 22, backgroundColor=k["color"], strokeColor="#1e1e1e",
              fillStyle="solid", roughness=0)
         text(cx(c), cy(r), "K", 12, "#1e1e1e", "center")
-    for pl in P["plates"]:
+    for r, c in A["rocks"]:
+        base("ellipse", cx(c) - 15, cy(r) - 13, 30, 26, backgroundColor=ROCK_COLOR, strokeColor="#495057",
+             fillStyle="solid", roughness=1)
+    for e in P["rune_gates"]:
+        edge_bar(*e, RUNE_COLOR, dashed=True, label="R")
+    for cell, k in P["runes"]:
+        r, c = cell
+        base("ellipse", cx(c) - 12, cy(r) - 12, 24, 24, backgroundColor="#f3d9fa", strokeColor=RUNE_COLOR,
+             fillStyle="solid", strokeWidth=2, roughness=0)
+        text(cx(c), cy(r), RUNE_LETTERS[k], 15, RUNE_COLOR, "center")
+    for pl in A["plates"]:
         edge_bar(*pl["edge"], PLATE_COLOR, dashed=True)
         r, c = pl["plate"]
         base("rectangle", cx(c) - 13, cy(r) - 13, 26, 26, strokeColor=PLATE_COLOR, strokeWidth=2, roughness=0)
         dot(cx(c), cy(r), 7, PLATE_COLOR, PLATE_COLOR)
-    for e in P["switch_a"]:
+    for e in A["switch_a"]:
         edge_bar(*e, LEVER_COLOR, dashed=True, label="A")
-    for e in P["switch_b"]:
+    for e in A["switch_b"]:
         edge_bar(*e, SWITCH_B_COLOR, dashed=True, label="B")
-    if P["lever"]:
-        r, c = P["lever"]
+    if A["lever"]:
+        r, c = A["lever"]
         base("ellipse", cx(c) - 12, cy(r) - 12, 24, 24, strokeColor=LEVER_COLOR, strokeWidth=2, roughness=0)
         text(cx(c), cy(r), "L", 15, LEVER_COLOR, "center")
-    for b in P["boxes"]:
+    for b in A["boxes"]:
         r, c = b
         base("rectangle", cx(c) - 13, cy(r) - 13, 26, 26, backgroundColor="#b08968", strokeColor="#7f5539",
              fillStyle="solid", strokeWidth=2, roughness=0)
@@ -706,9 +923,14 @@ def draw_maze(L, D, X0, Y0):
 
     for run in D["patrols"]:
         patrol(run, "#fd7e14", "#e8590c")
-    for run in D["forced"]:
+    for run in D["forced"] + [g["run"] for g in A["guards"]]:
         m = patrol(run, "#e03131", "#c92a2a")
         text(cx(m[1]) + 13, cy(m[0]) - 15, "★", 16, "#9c36b5", "center")
+    for g in A["guards"]:  # the niche a box can shove the guard into
+        r, c = g["tip"]
+        base("rectangle", cx(c) - 14, cy(r) - 14, 28, 28, strokeColor="#c92a2a", strokeStyle="dashed", strokeWidth=2,
+             roughness=0)
+        text(cx(c), cy(r), "W", 13, "#c92a2a", "center")
     if D["bang"]:
         a, b = D["bang"]
         xs = [cx(a[1]), cx(b[1])]; ys = [cy(a[0]), cy(b[0])]
@@ -751,11 +973,15 @@ def draw_legend(X, Y):
     text(X, Y, "Legende", 24)
     rows = [("S / Z", "#2f9e44", "Start / Ziel"), ("▬", "#495057", "Wand"),
             ("●↔", "#e03131", "Pflicht-Gegner ★ (einziger Weg)"), ("●↔", "#fd7e14", "Patrouille (Umweg möglich)"),
-            ("!", "#e03131", "schwierigste Stelle"), ("♥", "#e64980", "+1 HP (tiefste Sackgasse)"),
+            ("!", "#e03131", "schwierigste Stelle"), ("♥", "#e64980", "volle HP + 1 Extra (tiefste Sackgasse)"),
             ("■", "#b08968", "Kiste (schieben / ziehen)"), ("→", "#868e96", "Lösungsweg der Kiste"),
-            ("◆K", KEY_COLORS[0], "Schlüssel ..."), ("▮", KEY_COLORS[0], "... öffnet Tür gleicher Farbe"),
+            ("◆K", KEY_COLORS[0], "Schlüssel ..."), ("▮", KEY_COLORS[0], "... Tür gleicher Farbe: davor E = aufschließen"),
             ("▣", PLATE_COLOR, "Druckplatte → öffnet Tor (gestrichelt)"),
             ("Ⓛ", LEVER_COLOR, "Hebel: schaltet Wände A ↔ B"),
+            ("Ⓐ", RUNE_COLOR, "Rune: in Reihenfolge A, B, … betreten → R öffnet"),
+            ("▒", "#74c0fc", "Eis: rutschen bis zum Hindernis"), ("●", ROCK_COLOR, "Fels (blockiert)"),
+            ("W", "#c92a2a", "Nische: Kiste drängt den Wächter hinein"),
+            ("⋯", "#1098ad", "Rätselraum (Eingang → Ausgang)"),
             ("Ziehen", "#1098ad", "Fähigkeit einsammeln"), ("- ->", "#1971c2", "Hauptweg S → Z"),
             ("▭", "#0c8599", "Kamera-Sichtfeld 5×3"),
             ("1 2 3", "#495057", "Reihenfolge: sehen → holen → benutzen")]
@@ -783,24 +1009,62 @@ def draw_encounter(X, Y):
          "Gegner berühren → Kampf-Bildschirm\n"
          "3 Angriffswellen (~10 s) ausweichen, Treffer −1 HP\n"
          "HP bleiben zwischen Kämpfen, 0 HP → Neustart\n"
+         "Gegner besiegt → +1 HP\n"
          "Kämpfe werden pro Level schwerer", 16, "#343a40")
 
-designs = []
-for L in LEVELS:
-    for seed in range(1, 40000):
-        D = design(L, seed)
+def _try(job):
+    li, seed = job
+    D = design(LEVELS[li], seed)
+    return (seed, score(D)) if D else None
+
+def find(li, cached, search):
+    """The level's design: the cached seed, or a search on all cores. --search scores several valid seeds (option 8:
+    the one that asks for the most thinking wins); the tutorial keeps its first valid seed."""
+    L = LEVELS[li]
+    if cached and (not search or L.get("tutorial")):
+        D = design(L, cached)
         if D:
-            designs.append(D)
-            print(f'{L["name"]}: seed {seed}, route {len(D["route"])}, solution {len(D["solution"]) - 1} steps, '
-                  f'forced {len(D["forced"])}, patrols {len(D["patrols"])}, gates {[g for g, _ in L["gates"]]}, '
-                  f'deep dead ends {D["deep"]}', file=sys.stderr)
-            names = {KEY_COLORS[0]: "gelbe Tür", KEY_COLORS[1]: "blaue Tür", PLATE_COLOR: "Tor",
-                     LEVER_COLOR: "Wand A"}
-            for color, seen, got in D["events"]:
-                print(f'    {names[color]}: gesehen @{seen} → Lösung geholt @{got}', file=sys.stderr)
-            break
-    else:
+            return cached, D
+        print(f'{L["name"]}: cached seed {cached} no longer valid, searching', file=sys.stderr)
+    want = 1 if (L.get("tutorial") or not search) else 4
+    found, t0 = [], None
+    import multiprocessing as mp
+    with mp.get_context("fork").Pool() as pool:
+        for res in pool.imap(_try, ((li, s) for s in range(1, 1_000_000)), chunksize=8):
+            if res:
+                found.append(res)
+                t0 = t0 or time.time()
+            if len(found) >= want or (t0 and time.time() - t0 > 900):
+                break
+        pool.terminate()
+    if not found:
         sys.exit(f'no valid seed for {L["name"]}')
+    seed = max(found, key=lambda f: f[1])[0]
+    return seed, design(L, seed)
+
+args = [a for a in sys.argv[1:] if not a.startswith("--")]
+search = "--search" in sys.argv
+try:
+    with open(SEEDS_FILE) as fh:
+        seeds = json.load(fh)
+except FileNotFoundError:
+    seeds = {}
+designs = []
+for li, L in enumerate(LEVELS):
+    t = time.time()
+    seed, D = find(li, seeds.get(L["name"]), search)
+    seeds[L["name"]] = seed
+    designs.append(D)
+    rooms = ", ".join(f'{ROOM_NAMES[rm["kind"]]} {rm["content"]["moves"]} Züge' for rm in D["rooms"])
+    print(f'{L["name"]}: seed {seed} ({time.time() - t:.0f} s), route {len(D["route"])}, '
+          f'solution {len(D["steps"]) - 1} steps, score {score(D):.2f}, forced {len(D["forced"])}, '
+          f'patrols {len(D["patrols"])}, gates {[g for g, _ in L["gates"]]}, deep dead ends {D["deep"]}'
+          + (f', rooms: {rooms}' if rooms else ''), file=sys.stderr)
+    names = {KEY_COLORS[0]: "gelbe Tür", KEY_COLORS[1]: "blaue Tür", PLATE_COLOR: "Tor", LEVER_COLOR: "Wand A"}
+    for color, seen, got in D["events"]:
+        print(f'    {names[color]}: gesehen @{seen} → Lösung geholt @{got}', file=sys.stderr)
+with open(SEEDS_FILE, "w") as fh:
+    json.dump(seeds, fh, ensure_ascii=False, indent=1)
 
 text(0, -150, "Labyrinth – Pen-and-Paper-Prototyp", 36)
 # 3×2 grid, mazes top-aligned per row; the tutorial hints sit under the (small) tutorial maze
@@ -819,25 +1083,23 @@ for row in range(0, len(LEVELS), COLS):
 X1 = right + 60
 X2 = X1 + 560
 draw_legend(X1, -60)
-panel(X1, 440, "Kamera",
+panel(X1, 580, "Kamera",
       "Level-Start: Kamera zeigt kurz das ganze Labyrinth\n"
       "und zoomt dann auf den Spieler (5×3 Felder).\n"
       "Nur in diesem Moment sieht man alles – merken!\n"
       "Die Kamera stoppt am Rand des Labyrinths.")
-panel(X1, 600, "Progression: erst sehen, dann holen",
+panel(X1, 740, "Progression: Rätsel zuerst, Kämpfe als Strafe",
       "Tutorial: bewegen, Patrouille, ♥, erster Kampf, Kiste schieben.\n"
-      "1 Schlüssel: verschlossene Tür → Schlüssel in der Sackgasse\n"
-      "   direkt daneben → zurück zur Tür.\n"
-      "2 Handschuh: Kiste steckt in Sackgasse fest, Tor ist zu →\n"
-      "   neben dem Tor liegt der Handschuh (Ziehen) → zurück,\n"
-      "   Kiste rausziehen → auf die Druckplatte.\n"
-      "3 Hebel: Wand A sperrt → Hebel in einer Sackgasse abseits\n"
-      "   (B schließt das ♥!), dazu zwei Türen (gelb → blau).\n"
-      "Ab Level 3 liegt die Lösung außer Sicht und weiter weg:\n"
-      "   lange Sackgasse statt direkt neben dem Hindernis.\n"
-      "4 Schild: zwei Kämpfe ohne Schild, dann liegt er im Gang,\n"
-      "   der nächste Kampf ist die Übungsrunde.\n"
-      "5 Finale: alles kombiniert + Doppelkampf (!) vor dem Ziel.\n"
+      "1 Schlüssel: Tür → Schlüssel in der fernsten Sackgasse, mit E\n"
+      "   aufschließen. Eishalle: man rutscht bis zum nächsten Hindernis.\n"
+      "2 Handschuh: Kiste rausziehen → Druckplatte. Wächtergang: Kiste\n"
+      "   in den Gang schieben drängt den Wächter in seine Nische.\n"
+      "3 Hebel: Hebelkammer (A ↔ B mehrmals umlegen, Kiste mitnehmen),\n"
+      "   Runen A → B → C: die Reihenfolge sieht man nur beim Start.\n"
+      "4 Schild: zwei Platten, eine Kiste (selbst auf eine Platte stellen),\n"
+      "   schwerere Eishalle, Wächtergang nur mit Ziehen.\n"
+      "5 Finale: 4 Runen, große Hebelkammer, Platten, Eishalle mit Kiste,\n"
+      "   Doppelkampf (!) vor dem Ziel.\n"
       "Fähigkeiten bleiben für alle späteren Level.")
 draw_encounter(X2, -60)
 panel(X2, 400, "Fähigkeiten",
@@ -845,7 +1107,9 @@ panel(X2, 400, "Fähigkeiten",
       "   E halten + weggehen = Kiste mitziehen\n"
       "Schild (Level 4, nach 2 Kämpfen): Leertaste im\n"
       "   Kampf blockt 1 Treffer pro Welle\n"
-      "Hebel: E drücken · R = Level neu starten")
+      "Hebel / Tür aufschließen: E drücken · R = Level neu starten\n"
+      "Druckplatte: Kiste drauf – oder selbst draufstellen\n"
+      "   (hält das Tor nur, solange du darauf stehst)")
 panel(X2, 600, "MDA",
       "Mechanics: Labyrinth, kleine Kamera, Gegner, Ausweich-Kämpfe,\n"
       "   HP + Herzen, Kisten, Schlüssel/Türen, Druckplatten, Hebel,\n"
@@ -860,9 +1124,9 @@ panel(X2, 600, "MDA",
 
 doc = dict(type="excalidraw", version=2, source="https://excalidraw.com", elements=els,
            appState=dict(viewBackgroundColor="#ffffff", gridSize=None), files={})
-with open(sys.argv[1], "w") as f:
+with open(args[0], "w") as f:
     json.dump(doc, f, ensure_ascii=False)
-print(f"{len(els)} elements -> {sys.argv[1]}", file=sys.stderr)
+print(f"{len(els)} elements -> {args[0]}", file=sys.stderr)
 
 # --- Unity export -------------------------------------------------------------
 def wall_runs(adj, W, H):
@@ -889,12 +1153,12 @@ def wall_runs(adj, W, H):
                 r += 1
     return runs
 
-if len(sys.argv) > 2:
+if len(args) > 1:
     cell = lambda p: dict(r=p[0], c=p[1])
     edge = lambda e: dict(a=cell(e[0]), b=cell(e[1]))
     out = []
     for L, D in zip(LEVELS, designs):
-        route, P = D["route"], D["P"]
+        route, P, A = D["route"], D["P"], D["A"]
         hints = []
         if L.get("tutorial"):
             for kind, p, i in tutorial_marks(D):
@@ -909,21 +1173,28 @@ if len(sys.argv) > 2:
             forced=[dict(cells=[cell(p) for p in run]) for run in D["forced"]],
             patrols=[dict(cells=[cell(p) for p in run]) for run in D["patrols"]],
             hints=hints,
-            boxes=[cell(b) for b in P["boxes"]],
+            boxes=[cell(b) for b in A["boxes"]],
             keys=[dict(cell=cell(k["cell"]), color=k["color"]) for k in P["keys"]],
             doors=[dict(edge=edge(d["edge"]), color=d["color"]) for d in P["doors"]],
-            plates=[dict(cell=cell(p["plate"]), gate=edge(p["edge"])) for p in P["plates"]],
-            levers=[cell(P["lever"])] if P["lever"] else [],
-            switchWalls=[dict(edge=edge(e), set="A") for e in P["switch_a"]] +
-                        [dict(edge=edge(e), set="B") for e in P["switch_b"]],
+            plates=[dict(cell=cell(p["plate"]), gate=edge(p["edge"])) for p in A["plates"]],
+            levers=[cell(A["lever"])] if A["lever"] else [],
+            switchWalls=[dict(edge=edge(e), set="A") for e in A["switch_a"]] +
+                        [dict(edge=edge(e), set="B") for e in A["switch_b"]],
+            ice=[cell(c) for c in sorted(A["ice"])], rocks=[cell(c) for c in sorted(A["rocks"])],
+            runes=[dict(cell=cell(c), order=k) for c, k in P["runes"]],
+            runeGates=[edge(e) for e in P["rune_gates"]],
+            guards=[dict(cells=[cell(c) for c in g["run"]], seal=cell(g["line"][-1]), tip=cell(g["tip"]))
+                    for g in A["guards"]],
+            rooms=[dict(kind=rm["kind"], cells=[cell(c) for c in sorted(rm["cells"])]) for rm in D["rooms"]],
+            reveal=2.0 + 0.75 * len(P["runes"]),
             abilities=[dict(kind=a["kind"], cell=cell(a["cell"])) for a in D["abilities"]],
             startAbilities=L.get("start_abilities", []),
             fightTier=L["tier"], waves=L["waves"], intro=f'Neu: {L["new"]}',
-            # solver solution: player cell per step; toggle = lever flipped, pull = a box was pulled along
-            solution=[dict(r=s1[0][0], c=s1[0][1], toggle=s1[3] != s0[3],
-                           pull=s1[1] != s0[1] and s1[0] not in s0[1])
-                      for s0, s1 in zip(D["solution"], D["solution"][1:])],
+            # solver solution: player cell after each action; toggle = lever flipped, unlock = a door unlocked,
+            # pull = a box was pulled along (moves into ice cells end where the slide stops)
+            solution=[dict(r=c[0], c=c[1], toggle=a == "toggle", unlock=a == "unlock", pull=a == "pull")
+                      for c, a in D["steps"][1:]],
         ))
-    with open(sys.argv[2], "w") as fh:
+    with open(args[1], "w") as fh:
         json.dump(dict(levels=out), fh, ensure_ascii=False, indent=1)
-    print(f"{len(out)} levels -> {sys.argv[2]}", file=sys.stderr)
+    print(f"{len(out)} levels -> {args[1]}", file=sys.stderr)

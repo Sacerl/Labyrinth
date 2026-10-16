@@ -30,7 +30,11 @@ using UnityEngine;
 [Serializable] public class PlateData { public CellPos cell; public Edge gate; }
 [Serializable] public class SwitchWallData { public Edge edge; public string set; }
 [Serializable] public class AbilityData { public string kind; public CellPos cell; }
-[Serializable] public class SolutionStep { public int r, c; public bool toggle, pull; }
+[Serializable] public class SolutionStep { public int r, c; public bool toggle, unlock, pull; }
+[Serializable] public class RuneData { public CellPos cell; public int order; }
+// A must-fight guard patrolling `cells`; a box pushed along its corridor shoves it past `seal` into `tip`.
+[Serializable] public class GuardData { public CellPos[] cells; public CellPos seal, tip; }
+[Serializable] public class RoomData { public string kind; public CellPos[] cells; }
 
 [Serializable] public class LevelData
 {
@@ -48,6 +52,12 @@ using UnityEngine;
     public SwitchWallData[] switchWalls;
     public AbilityData[] abilities;
     public string[] startAbilities;
+    public CellPos[] ice, rocks;
+    public RuneData[] runes;
+    public Edge[] runeGates;
+    public GuardData[] guards;
+    public RoomData[] rooms;
+    public float reveal; // seconds the level-start overview is shown (longer with runes to memorise)
     public SolutionStep[] solution;
 
     public const float Cell = 3f;
