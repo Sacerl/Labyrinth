@@ -34,10 +34,12 @@ public class Sound : MonoBehaviour
         }
     }
 
-    public static void Create()
+    // parent: the persistent Game object, so the music keeps playing across scene changes.
+    public static void Create(Transform parent)
     {
         if (instance) return;
         instance = new GameObject("Sound").AddComponent<Sound>();
+        instance.transform.SetParent(parent, false);
         AudioListener.volume = Muted ? 0f : 1f;
     }
 

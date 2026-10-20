@@ -1,4 +1,3 @@
-using System;
 using UnityEngine;
 using UnityEngine.EventSystems;
 using UnityEngine.InputSystem;
@@ -29,13 +28,13 @@ public static class PlayerChoice
     public static string Sheet => "Characters/" + All[Index].sheet;
 }
 
-// Start screen: the five characters on a pentagon. ←/→ (or A/D) walk around it, Enter picks, or click one.
+// CharacterSelect scene, the first one: the five characters on a pentagon. ←/→ (or A/D) walk around it, Enter picks,
+// or click one; then the LevelSelect scene loads. The Canvas is set up in the scene, the slots are built when it loads.
 public class CharacterSelect : MonoBehaviour
 {
     const float Radius = 290f;
     static readonly Vector2 Center = new(0, -60);
 
-    Action onDone;
     int selected;
     RectTransform[] slots;
     Image[] frames;
@@ -45,22 +44,12 @@ public class CharacterSelect : MonoBehaviour
 
     static Font Font => Resources.GetBuiltinResource<Font>("LegacyRuntime.ttf");
 
-    public static CharacterSelect Create(Action done)
+    void Awake() => Build();
+
+    void Start()
     {
-        var go = new GameObject("Character Select");
-        var canvas = go.AddComponent<Canvas>();
-        canvas.renderMode = RenderMode.ScreenSpaceOverlay;
-        canvas.sortingOrder = 11; // above the level menu
-        var scaler = go.AddComponent<CanvasScaler>();
-        scaler.uiScaleMode = CanvasScaler.ScaleMode.ScaleWithScreenSize;
-        scaler.referenceResolution = new Vector2(1920, 1080);
-        scaler.matchWidthOrHeight = 0.5f;
-        go.AddComponent<GraphicRaycaster>();
-        var cs = go.AddComponent<CharacterSelect>();
-        cs.onDone = done;
-        cs.Build();
-        go.SetActive(false);
-        return cs;
+        GameManager.Instance.EnterMenu();
+        Select(PlayerChoice.Index);
     }
 
     void Build()
@@ -107,14 +96,6 @@ public class CharacterSelect : MonoBehaviour
         }
     }
 
-    public void Show()
-    {
-        gameObject.SetActive(true);
-        Select(PlayerChoice.Index);
-    }
-
-    public void Hide() => gameObject.SetActive(false);
-
     void Select(int i)
     {
         int n = slots.Length;
@@ -134,7 +115,7 @@ public class CharacterSelect : MonoBehaviour
     {
         Sound.Play("Accept");
         PlayerChoice.Index = selected;
-        onDone?.Invoke();
+        SceneLoader.Instance.Load(SceneLoader.LevelSelect);
     }
 
     void Update()

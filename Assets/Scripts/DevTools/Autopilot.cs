@@ -2,7 +2,7 @@ using UnityEngine;
 
 // Test tool: plays each level's solver solution (from levels.json) with real game input: walking, pushing,
 // pulling (E held), flipping the lever and unlocking doors (E press). Fights cost no HP while it runs.
-// Add it to any GameObject in Play mode; Status says how far it got.
+// Add it to the Game object in Play mode (it survives the scene changes); Status says how far it got.
 public class Autopilot : MonoBehaviour
 {
     public string Status { get; private set; } = "starting";

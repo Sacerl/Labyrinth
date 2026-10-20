@@ -3,7 +3,8 @@ using System.Collections;
 using System.Collections.Generic;
 using UnityEngine;
 
-// The fight box. Lives far away from the maze; the camera jumps here during an encounter.
+// The fight box, in the Fight scene. That scene is loaded on top of the level for an encounter; the box sits far
+// away from the maze and the level's camera jumps here.
 public class BattleArena : MonoBehaviour
 {
     public static readonly Vector2 Origin = new(1000f, 1000f);
@@ -32,12 +33,10 @@ public class BattleArena : MonoBehaviour
     float invulnerableUntil;
     Action onHit;
 
-    public static BattleArena Create()
+    void Awake()
     {
-        var arena = new GameObject("Battle Arena").AddComponent<BattleArena>();
-        arena.transform.position = Origin;
-        arena.Build();
-        return arena;
+        transform.position = Origin;
+        Build();
     }
 
     void Build()

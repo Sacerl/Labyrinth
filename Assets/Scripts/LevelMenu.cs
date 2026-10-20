@@ -1,41 +1,23 @@
-using System;
 using UnityEngine;
-using UnityEngine.EventSystems;
 using UnityEngine.InputSystem;
-using UnityEngine.InputSystem.UI;
 using UnityEngine.UI;
 
-// Start screen: pick a level by click or number key 1–4.
+// LevelSelect scene: pick a level by click or number key 1–6; C goes back to the character select.
+// The Canvas is set up in the scene, the buttons are built from levels.json when it loads.
 public class LevelMenu : MonoBehaviour
 {
-    Action<int> onPick;
-    Action onCharacters;
     int count;
 
     static Font Font => Resources.GetBuiltinResource<Font>("LegacyRuntime.ttf");
 
-    public static LevelMenu Create(LevelSet levels, Action<int> pick, Action characters)
+    void Awake()
     {
-        if (!FindAnyObjectByType<EventSystem>())
-            new GameObject("EventSystem", typeof(EventSystem), typeof(InputSystemUIInputModule));
-
-        var go = new GameObject("Level Menu");
-        var canvas = go.AddComponent<Canvas>();
-        canvas.renderMode = RenderMode.ScreenSpaceOverlay;
-        canvas.sortingOrder = 10; // above the HUD
-        var scaler = go.AddComponent<CanvasScaler>();
-        scaler.uiScaleMode = CanvasScaler.ScaleMode.ScaleWithScreenSize;
-        scaler.referenceResolution = new Vector2(1920, 1080);
-        scaler.matchWidthOrHeight = 0.5f;
-        go.AddComponent<GraphicRaycaster>();
-
-        var menu = go.AddComponent<LevelMenu>();
-        menu.onPick = pick;
-        menu.onCharacters = characters;
-        menu.count = levels.levels.Length;
-        menu.Build(levels);
-        return menu;
+        var levels = GameManager.Instance.Levels;
+        count = levels.levels.Length;
+        Build(levels);
     }
+
+    void Start() => GameManager.Instance.EnterMenu();
 
     void Build(LevelSet levels)
     {
@@ -60,7 +42,7 @@ public class LevelMenu : MonoBehaviour
             colors.highlightedColor = SpriteFactory.Hex("#868e96");
             colors.pressedColor = SpriteFactory.Hex("#1971c2");
             button.colors = colors;
-            button.onClick.AddListener(() => { Sound.Play("Accept"); onPick(index); });
+            button.onClick.AddListener(() => { Sound.Play("Accept"); GameManager.Instance.StartAt(index); });
             var label = Label($"{i + 1}   {L.name}  ({L.width}×{L.height})", Vector2.zero, 40, Color.white, rt);
             label.rectTransform.sizeDelta = rt.sizeDelta;
         }
@@ -91,24 +73,20 @@ public class LevelMenu : MonoBehaviour
         return t;
     }
 
-    public bool Visible => gameObject.activeSelf;
-    public void Show() => gameObject.SetActive(true);
-    public void Hide() => gameObject.SetActive(false);
-
     void Update()
     {
         var kb = Keyboard.current;
         if (kb == null) return;
         if (kb.cKey.wasPressedThisFrame)
         {
-            onCharacters?.Invoke();
+            SceneLoader.Instance.Load(SceneLoader.CharacterSelect);
             return;
         }
         for (int i = 0; i < count && i < 9; i++)
             if (kb[Key.Digit1 + i].wasPressedThisFrame || kb[Key.Numpad1 + i].wasPressedThisFrame)
             {
                 Sound.Play("Accept");
-                onPick(i);
+                GameManager.Instance.StartAt(i);
                 return;
             }
     }

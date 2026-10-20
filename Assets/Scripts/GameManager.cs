@@ -6,16 +6,16 @@ using UnityEngine.Rendering.Universal;
 
 // Runs the game loop: menu → level intro → explore/puzzles/fights → goal → next level.
 // 0 HP restarts the current level; R restarts it by choice (e.g. a box got stuck).
+// One instance for the whole session (Resources/Game prefab, created before the first scene loads), so HP and
+// abilities survive the scene changes; the scenes themselves are switched by the SceneLoader next to it.
 public class GameManager : MonoBehaviour
 {
     public static GameManager Instance { get; private set; }
 
     [SerializeField] int maxHp = 5;
-    [SerializeField] bool showMenu = true;
-    [SerializeField] int startLevel = 0; // used when the menu is off
     [SerializeField] float introHold = 2f, introZoom = 1.2f;
 
-    enum State { Menu, Intro, Exploring, Encounter, Transition, Won }
+    enum State { Menu, Intro, Exploring, Encounter, Transition }
 
     LevelSet levels;
     BuiltLevel current;
@@ -26,9 +26,6 @@ public class GameManager : MonoBehaviour
     CameraFollow cam;
     BattleArena arena;
     Hud hud;
-    LevelMenu menu;
-    CharacterSelect characters;
-    bool characterChosen; // asked once per session, C in the level menu asks again
     HashSet<string> abilities = new(), abilitiesAtStart = new();
     Vector2Int lastPlayerCell;
     static readonly HashSet<string> hintsShown = new(); // mechanic hints: once per session
@@ -43,6 +40,16 @@ public class GameManager : MonoBehaviour
         hintsShown.Clear();
     }
 
+    // Pressing Play in any scene works: the Game object exists before that scene loads.
+    [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.BeforeSceneLoad)]
+    static void Bootstrap()
+    {
+        var game = Instantiate(Resources.Load<GameObject>("Game"));
+        game.name = "Game";
+        DontDestroyOnLoad(game);
+    }
+
+    public LevelSet Levels => levels;
     public PuzzleGrid Grid => current?.grid;
     public Vector2 PlayerPosition => current != null ? (Vector2)current.player.transform.position : Vector2.zero;
     public string LevelName => current != null ? Grid.Level.name : "";
@@ -54,41 +61,28 @@ public class GameManager : MonoBehaviour
 
     void Awake()
     {
+        if (Instance && Instance != this)
+        {
+            Destroy(gameObject);
+            return;
+        }
         Instance = this;
         levels = LevelSet.Load();
+        hp = maxHp;
 
-        if (!FindAnyObjectByType<Light2D>())
-            new GameObject("Global Light 2D").AddComponent<Light2D>().lightType = Light2D.LightType.Global;
-
-        var camera = Camera.main;
-        camera.clearFlags = CameraClearFlags.SolidColor;
-        camera.backgroundColor = SpriteFactory.Hex("#05060a");
-        camera.GetUniversalAdditionalCameraData().renderPostProcessing = true; // bloom, vignette, chaos effects
-        cam = camera.GetComponent<CameraFollow>();
-        if (!cam) cam = camera.gameObject.AddComponent<CameraFollow>();
-
-        Sound.Create();
+        Sound.Create(transform);
         hud = Hud.Create(maxHp);
-        arena = BattleArena.Create();
-        menu = LevelMenu.Create(levels, StartAt, ShowCharacters);
-        characters = CharacterSelect.Create(() =>
-        {
-            characterChosen = true;
-            characters.Hide();
-            menu.Show();
-        });
-    }
-
-    void Start()
-    {
-        if (showMenu) ShowMenu();
-        else StartAt(startLevel);
+        hud.transform.SetParent(transform, false);
     }
 
     void Update()
     {
         var kb = Keyboard.current;
-        if (state != State.Menu && kb != null && kb.escapeKey.wasPressedThisFrame) ShowMenu();
+        if (state != State.Menu && kb != null && kb.escapeKey.wasPressedThisFrame)
+        {
+            StopAllCoroutines();
+            SceneLoader.Instance.Load(SceneLoader.LevelSelect);
+        }
         else if (state == State.Exploring && GameInput.RestartPressed) Restart();
         if (state == State.Exploring && PlayerCell != lastPlayerCell)
         {
@@ -132,51 +126,49 @@ public class GameManager : MonoBehaviour
         return false;
     }
 
+    // A fresh run from the level menu or the win screen: full HP, only the abilities the level starts with.
     public void StartAt(int index)
     {
         StopAllCoroutines();
-        menu.Hide();
-        characters.Hide();
         index = Mathf.Clamp(index, 0, levels.levels.Length - 1);
         hp = maxHp;
         bonusHp = false;
         abilities = new HashSet<string>(levels.levels[index].startAbilities ?? new string[0]);
-        LoadLevel(index);
+        SceneLoader.Instance.LoadLevel(index);
     }
 
-    void ShowMenu()
+    // Called by the menu scenes (character select, level select, win screen). music: null = silence.
+    public void EnterMenu(string music = "Menu")
     {
         StopAllCoroutines();
-        arena.Abort();
-        if (current != null) Destroy(current.root.gameObject);
         current = null;
-        cam.Bounds = null;
-        cam.Release();
         hud.SetLevel("");
         hud.SetStatus("");
         hud.ShowCenter("");
         hud.SetInventory(new string[0], new string[0]);
         state = State.Menu;
-        Sound.Music("Menu");
+        if (music != null) Sound.Music(music);
+        else Sound.StopMusic();
         Sound.Ambient(null);
-        if (characterChosen) menu.Show();
-        else ShowCharacters();
     }
 
-    void ShowCharacters()
-    {
-        menu.Hide();
-        characters.Show();
-    }
-
-    void LoadLevel(int index)
+    // Called by the LevelScene in Level1 … Level6 once the scene has loaded. HP and abilities are whatever the
+    // previous level (or StartAt / Restart / GameOver) left; they are remembered for the next restart.
+    public void BeginLevel(int index)
     {
         StopAllCoroutines();
-        if (current != null) Destroy(current.root.gameObject);
         levelIndex = index;
         var L = levels.levels[index];
         theme = LevelTheme.For(index);
         current = MazeBuilder.Build(L, theme);
+
+        var camera = Camera.main;
+        camera.clearFlags = CameraClearFlags.SolidColor;
+        camera.backgroundColor = SpriteFactory.Hex("#05060a");
+        camera.GetUniversalAdditionalCameraData().renderPostProcessing = true; // bloom, vignette, chaos effects
+        cam = camera.GetComponent<CameraFollow>();
+        if (!cam) cam = camera.gameObject.AddComponent<CameraFollow>();
+
         Sound.Music(theme.music ?? "Menu");
         Sound.Ambient(theme.ambientLoop, theme.ambientPitch, theme.ambientOneShot);
         abilities.UnionWith(L.startAbilities ?? new string[0]);
@@ -211,7 +203,7 @@ public class GameManager : MonoBehaviour
         hp = hpAtStart;
         bonusHp = bonusAtStart;
         abilities = new HashSet<string>(abilitiesAtStart);
-        LoadLevel(levelIndex);
+        SceneLoader.Instance.Reload();
     }
 
     void SetFrozen(bool frozen)
@@ -271,6 +263,13 @@ public class GameManager : MonoBehaviour
         if (state != State.Exploring) return;
         state = State.Encounter;
         SetFrozen(true);
+        StartCoroutine(Fight(enemy));
+    }
+
+    IEnumerator Fight(Enemy enemy)
+    {
+        yield return SceneLoader.Instance.OpenFight();
+        arena = FindAnyObjectByType<BattleArena>();
         cam.Focus(BattleArena.Origin);
 
         var L = levels.levels[levelIndex];
@@ -300,6 +299,7 @@ public class GameManager : MonoBehaviour
     void EndEncounter(Enemy enemy)
     {
         if (enemy) Destroy(enemy.gameObject);
+        SceneLoader.Instance.CloseFight();
         Sound.EndFight();
         Sound.Play("FightWon", 0.7f);
         if (hp < maxHp) Heal(1); // every defeated enemy gives back one HP
@@ -320,7 +320,7 @@ public class GameManager : MonoBehaviour
         hp = maxHp;
         bonusHp = false;
         abilities = new HashSet<string>(abilitiesAtStart);
-        LoadLevel(levelIndex);
+        SceneLoader.Instance.Reload();
     }
 
     public void Heal(int amount)
@@ -347,22 +347,13 @@ public class GameManager : MonoBehaviour
         StartCoroutine(NextLevel());
     }
 
+    // After the last level the next scene in the build order is the WinScreen.
     IEnumerator NextLevel()
     {
         SetFrozen(true);
-        if (levelIndex + 1 >= levels.levels.Length)
-        {
-            state = State.Won;
-            Sound.StopMusic();
-            Sound.Play("Victory");
-            hud.ShowCenter("Geschafft!\nAlle Labyrinthe gemeistert.");
-            yield return new WaitForSeconds(3f);
-            ShowMenu();
-            yield break;
-        }
         state = State.Transition;
         Sound.Play("LevelDone", 0.8f);
         yield return new WaitForSeconds(0.6f);
-        LoadLevel(levelIndex + 1);
+        SceneLoader.Instance.LoadNext();
     }
 }
